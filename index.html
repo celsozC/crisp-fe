@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" href="/favicon.png" type="image/png" />
+    <title>Convere - Crisp conversation export</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="header">
+        <h1>Convere - Crisp conversation export</h1>
+      </header>
+
+      <section class="panel panel--toolbar">
+        <div class="row">
+          <button type="button" id="loadConversations" class="btn primary">Load conversations</button>
+        </div>
+      </section>
+
+      <section class="panel" aria-labelledby="conv-heading">
+        <h2 id="conv-heading" class="sr-only">Conversation</h2>
+        <select id="conversationSelect" class="select-block" disabled aria-label="Conversation">
+          <option value="">Load conversations first…</option>
+        </select>
+        <p class="meta" id="convMeta"></p>
+        <div class="row">
+          <button type="button" id="fetchMessages" class="btn primary" disabled>Fetch messages</button>
+          <button type="button" id="downloadOne" class="btn" disabled>Download JSON</button>
+        </div>
+        <pre class="preview" id="preview" hidden></pre>
+      </section>
+
+      <section class="panel" aria-labelledby="bulk-heading">
+        <h2 id="bulk-heading" class="sr-only">Bulk export</h2>
+        <div class="row">
+          <button type="button" id="bulkExport" class="btn primary" disabled>Download all as ZIP</button>
+        </div>
+        <div class="progress-wrap" id="progressWrap" hidden>
+          <div class="progress-bar" id="progressBar"></div>
+          <p class="progress-text" id="progressText"></p>
+        </div>
+      </section>
+
+      <section class="panel status" id="statusPanel" hidden>
+        <p id="statusMsg"></p>
+      </section>
+    </div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
