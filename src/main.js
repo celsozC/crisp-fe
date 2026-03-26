@@ -85,6 +85,43 @@ function visitorEmail(c) {
   return e ? String(e).trim() : "";
 }
 
+function assistantEmailFromMessages(crispMessages) {
+  for (const m of crispMessages) {
+    if (m?.from !== "operator") continue;
+    const u = m.user && typeof m.user === "object" ? m.user : {};
+    const candidates = [
+      u.email,
+      u.user_email,
+      u.assistant_email,
+      u.username,
+      u.user_id,
+      u.id,
+    ];
+    for (const c of candidates) {
+      if (typeof c !== "string") continue;
+      const s = c.trim();
+      if (s && s.includes("@")) return s;
+    }
+  }
+  return "";
+}
+
+function assistantNameFromMessages(crispMessages) {
+  for (const m of crispMessages) {
+    if (m?.from !== "operator") continue;
+    const u = m.user && typeof m.user === "object" ? m.user : {};
+    const name = maybeString(u?.nickname) || maybeString(u?.username) || maybeString(u?.name);
+    if (name) return name;
+  }
+  return "";
+}
+
+function assistantIdentifierFromMessages(crispMessages) {
+  const email = assistantEmailFromMessages(crispMessages);
+  if (email) return email;
+  return assistantNameFromMessages(crispMessages) || "";
+}
+
 /** Dropdown: `[index] email` only (no session_id). */
 function conversationLabel(c) {
   const idx = c.session_index;
@@ -100,38 +137,105 @@ function exportFileBase(c, sessionIndex, total) {
   return idxStr ? `${idxStr}-${emailPart}` : emailPart;
 }
 
-function toISO(ms) {
-  const n = typeof ms === "number" ? ms : Number(ms);
-  if (!Number.isFinite(n)) return null;
-  return new Date(n).toISOString();
+const CONTENT_MAX_CHARS = 5000;
+
+function normalizeWhitespace(s) {
+  return String(s).replace(/\s+/g, " ").trim();
 }
 
-/**
- * Reduce Crisp messages to the fields most useful for an AI agent.
- * Removes duplicated ids (`session_id`, `website_id`) and bulky fields (`preview`, `mentions`, `read`, etc.).
- */
-function cleanMessage(m, i) {
-  const content = m.content;
-  return {
-    message_index: i,
-    timestamp: typeof m.timestamp === "number" ? m.timestamp : null,
-    timestamp_iso: toISO(m.timestamp),
-    type: m.type ?? null,
-    from: m.from ?? null,
-    origin: m.origin ?? null,
-    content,
-    sender_nickname: m.user?.nickname ?? null,
-  };
+function messageRole(m) {
+  return m?.from === "user" ? "user" : "assistant";
 }
 
-function buildExportPayload({ sessionIndex, email, messages, messageCount, exportedAt }) {
+function messageContentToString(m) {
+  const raw = m?.content;
+  if (typeof raw === "string") return normalizeWhitespace(raw);
+  try {
+    if (raw == null) return "";
+    return normalizeWhitespace(JSON.stringify(raw));
+  } catch {
+    return "";
+  }
+}
+
+function maybeString(v) {
+  if (typeof v !== "string") return "";
+  return v.trim();
+}
+
+function userIdentifierFromUser(u) {
+  const email = maybeString(u?.email);
+  if (email && email.includes("@")) return email;
+
+  const possibleName = maybeString(u?.nickname) || maybeString(u?.username) || maybeString(u?.name);
+  if (possibleName) return possibleName;
+
+  const id = maybeString(u?.user_id) || maybeString(u?.id);
+  return id || "";
+}
+
+function messageSenderIdentifier(m) {
+  const u = m?.user && typeof m.user === "object" ? m.user : {};
+  return userIdentifierFromUser(u) || null;
+}
+
+function toTruncatedContent(s) {
+  if (!s) return "";
+  if (s.length <= CONTENT_MAX_CHARS) return s;
+  return `${s.slice(0, CONTENT_MAX_CHARS)}…`;
+}
+
+function toAgentMessages(crispMessages) {
+  const out = [];
+  for (const m of crispMessages) {
+    const content = toTruncatedContent(messageContentToString(m));
+    if (!content) continue;
+    out.push({
+      role: messageRole(m),
+      content,
+      sender: messageSenderIdentifier(m),
+    });
+  }
+  return out;
+}
+
+function computeSummaryAndTags(agentMessages) {
+  const normalizedUserContents = new Map(); // content -> count
+  for (const msg of agentMessages) {
+    if (msg.role !== "user") continue;
+    const k = msg.content;
+    normalizedUserContents.set(k, (normalizedUserContents.get(k) ?? 0) + 1);
+  }
+
+  const tags = [];
+  if ([...normalizedUserContents.values()].some((n) => n >= 2)) tags.push("duplicate");
+  if (agentMessages.length && agentMessages[agentMessages.length - 1].role === "user") tags.push("no-response");
+
+  const firstUser = agentMessages.find((m) => m.role === "user");
+  const first = firstUser ?? agentMessages[0];
+  const summary = first ? toTruncatedContent(first.content).slice(0, 240) : "";
+
+  return { summary, tags };
+}
+
+function buildExportPayload({
+  sessionIndex,
+  email,
+  assistantEmail,
+  sessionIdShort,
+  crispMessages,
+}) {
+  const agentMessages = toAgentMessages(crispMessages);
+  const { summary, tags } = computeSummaryAndTags(agentMessages);
+  const assistantIdentifier = assistantEmail || assistantIdentifierFromMessages(crispMessages);
   return {
-    session_index: sessionIndex,
+    session_id: sessionIdShort,
     visitor_email: email || null,
-    website_id: websiteId,
-    exported_at: exportedAt,
-    message_count: messageCount ?? messages.length,
-    messages: messages.map((m, i) => cleanMessage(m, i)),
+    assistant_identifier: assistantIdentifier || null,
+    assistant_email: assistantEmail || null,
+    summary,
+    tags,
+    messages: agentMessages,
   };
 }
 
@@ -300,20 +404,21 @@ els.fetchMessages.addEventListener("click", async () => {
     currentSessionIndex = sessionIndex;
     els.downloadOne.disabled = messages.length === 0;
     const email = visitorEmail(conv ?? {});
+    const assistantEmail = assistantEmailFromMessages(messages);
+    const assistantIdentifier = assistantEmail || assistantIdentifierFromMessages(messages);
     els.convMeta.textContent =
       sessionIndex != null
-        ? `#${sessionIndex} — ${email || "(no email)"} — ${messages.length} message(s).`
+        ? `#${sessionIndex} — ${email || "(no email)"} / ${assistantIdentifier || "(no assistant identifier)"} — ${messages.length} message(s).`
         : `${messages.length} message(s).`;
-    const previewObj = {
-      session_index: sessionIndex,
-      visitor_email: email || null,
-      website_id: websiteId,
-      exported_at: new Date().toISOString(),
-      message_count: messages.length,
-      messages: messages.map((m, i) => cleanMessage(m, i)),
-    };
-    els.preview.textContent = JSON.stringify(previewObj, null, 2).slice(0, 12000);
-    if (JSON.stringify(previewObj, null, 2).length > 12000) {
+    const payload = buildExportPayload({
+      sessionIndex,
+      email,
+      sessionIdShort: sessionIndex != null ? `session_${sessionIndex}` : null,
+      assistantEmail: assistantEmailFromMessages(messages),
+      crispMessages: messages,
+    });
+    els.preview.textContent = JSON.stringify(payload, null, 2).slice(0, 12000);
+    if (JSON.stringify(payload, null, 2).length > 12000) {
       els.preview.textContent += "\n… (truncated in preview)";
     }
     els.preview.hidden = false;
@@ -331,13 +436,12 @@ els.downloadOne.addEventListener("click", () => {
   const idx = currentSessionIndex ?? 0;
   const conv = conversations.find((c) => c.session_id === currentSessionId);
   const email = visitorEmail(conv ?? {});
-  const exportedAt = new Date().toISOString();
   const payload = buildExportPayload({
     sessionIndex: currentSessionIndex,
     email,
-    messages: currentMessages,
-    messageCount: currentMessages.length,
-    exportedAt,
+    sessionIdShort: currentSessionIndex != null ? `session_${currentSessionIndex}` : null,
+    assistantEmail: currentMessages ? assistantEmailFromMessages(currentMessages) : "",
+    crispMessages: currentMessages,
   });
   const base = conv ? exportFileBase(conv, idx, total) : `${formatExportIndex(idx, total)}-export`;
   const name = `crisp-messages-${base}.json`;
@@ -360,7 +464,6 @@ els.bulkExport.addEventListener("click", async () => {
   try {
     els.bulkExport.disabled = true;
     const total = conversations.length;
-    const exportedAt = new Date().toISOString();
     for (let i = 0; i < total; i++) {
       const c = conversations[i];
       const sid = c.session_id;
@@ -374,9 +477,9 @@ els.bulkExport.addEventListener("click", async () => {
       const payload = buildExportPayload({
         sessionIndex,
         email,
-        messages,
-        messageCount: messages.length,
-        exportedAt,
+        sessionIdShort: `session_${sessionIndex}`,
+        assistantEmail: assistantEmailFromMessages(messages),
+        crispMessages: messages,
       });
       const fileBase = exportFileBase(c, sessionIndex, total);
       folder.file(`${fileBase}.json`, JSON.stringify(payload, null, 2));
