@@ -8,6 +8,7 @@ const $ = (id) => document.getElementById(id);
 
 const els = {
   loadConversations: $("loadConversations"),
+  pickExportFolder: $("pickExportFolder"),
   conversationSelect: $("conversationSelect"),
   convMeta: $("convMeta"),
   fetchMessages: $("fetchMessages"),
@@ -19,6 +20,7 @@ const els = {
   progressText: $("progressText"),
   statusPanel: $("statusPanel"),
   statusMsg: $("statusMsg"),
+  folderMeta: $("folderMeta"),
 };
 
 /** From server `/api/config` (WEBSITE_ID in .env). */
@@ -26,6 +28,13 @@ let websiteId = "";
 
 /** @type {Array<Record<string, unknown>>} */
 let conversations = [];
+/** Full list before applying the "skip already exported" filter. */
+let allConversations = [];
+/** @type {any} */
+let exportDirHandle = null;
+let exportDirScanned = false;
+/** @type {Set<string>} */
+let existingExportSessionIds = new Set();
 /** @type {unknown[] | null} */
 let currentMessages = null;
 /** @type {string | null} */
@@ -51,6 +60,50 @@ function showStatus(msg, isError) {
 function clearStatus() {
   els.statusPanel.hidden = true;
   els.statusMsg.textContent = "";
+}
+
+async function scanExportFolderForSessionIds(dirHandle, { maxDepth = 3, _depth = 0 } = {}) {
+  /** @type {Set<string>} */
+  const found = new Set();
+
+  for await (const entry of dirHandle.entries()) {
+    const [name, handle] = entry;
+    if (!name || typeof name !== "string") continue;
+    if (!handle) continue;
+
+    // Recurse into subfolders (eg. if you extracted a ZIP into a folder).
+    if (handle.kind === "directory") {
+      if (_depth >= maxDepth) continue;
+      const nested = await scanExportFolderForSessionIds(handle, { maxDepth, _depth: _depth + 1 });
+      for (const sid of nested) found.add(sid);
+      continue;
+    }
+
+    if (handle.kind !== "file") continue;
+    if (!name.endsWith(".json")) continue;
+
+    try {
+      const file = await handle.getFile();
+      const text = await file.text();
+      const obj = JSON.parse(text);
+      // We only care about our export format, but we detect it by the presence of `session_id`.
+      const sid = obj?.session_id ?? obj?.crisp_session_id;
+      if (typeof sid === "string" && sid.trim()) found.add(sid.trim());
+    } catch {
+      // Ignore invalid/partial files.
+    }
+  }
+
+  return found;
+}
+
+async function ensureExportFolderScanned() {
+  if (!exportDirHandle) return;
+  if (exportDirScanned) return;
+  exportDirScanned = true; // avoid parallel scans
+  els.folderMeta.textContent = "Scanning export folder…";
+  existingExportSessionIds = await scanExportFolderForSessionIds(exportDirHandle);
+  els.folderMeta.textContent = `Found ${existingExportSessionIds.size} exported session(s) in folder.`;
 }
 
 /**
@@ -222,15 +275,16 @@ function buildExportPayload({
   sessionIndex,
   email,
   assistantEmail,
-  sessionIdShort,
+  crispSessionId,
   crispMessages,
 }) {
   const agentMessages = toAgentMessages(crispMessages);
   const { summary, tags } = computeSummaryAndTags(agentMessages);
   const assistantIdentifier = assistantEmail || assistantIdentifierFromMessages(crispMessages);
   return {
-    session_id: sessionIdShort,
+    session_index: sessionIndex,
     visitor_email: email || null,
+    session_id: crispSessionId || null,
     assistant_identifier: assistantIdentifier || null,
     assistant_email: assistantEmail || null,
     summary,
@@ -329,6 +383,27 @@ function formatExportIndex(n, totalCount) {
   return String(n).padStart(w, "0");
 }
 
+els.pickExportFolder.addEventListener("click", async () => {
+  clearStatus();
+  if (typeof window.showDirectoryPicker !== "function") {
+    showStatus("Folder picker not supported in this browser (use Chrome/Edge).", true);
+    return;
+  }
+  try {
+    els.pickExportFolder.disabled = true;
+    exportDirHandle = await window.showDirectoryPicker();
+    exportDirScanned = false;
+    existingExportSessionIds = new Set();
+    await ensureExportFolderScanned();
+    // Re-load conversations so the dropdown reflects the skipped ones.
+    els.loadConversations.click();
+  } catch (e) {
+    showStatus(e instanceof Error ? e.message : String(e), true);
+  } finally {
+    els.pickExportFolder.disabled = false;
+  }
+});
+
 els.loadConversations.addEventListener("click", async () => {
   clearStatus();
   if (!websiteId) {
@@ -337,7 +412,17 @@ els.loadConversations.addEventListener("click", async () => {
   }
   try {
     els.loadConversations.disabled = true;
-    conversations = await fetchAllConversations(websiteId);
+    allConversations = await fetchAllConversations(websiteId);
+    conversations = allConversations;
+    let skipped = 0;
+    if (exportDirHandle) {
+      await ensureExportFolderScanned();
+      if (existingExportSessionIds.size > 0) {
+        const before = conversations.length;
+        conversations = conversations.filter((c) => !existingExportSessionIds.has(c.session_id));
+        skipped = before - conversations.length;
+      }
+    }
     els.conversationSelect.innerHTML = "";
     if (conversations.length === 0) {
       const opt = document.createElement("option");
@@ -353,7 +438,7 @@ els.loadConversations.addEventListener("click", async () => {
     }
     const placeholder = document.createElement("option");
     placeholder.value = "";
-    placeholder.textContent = `Select a conversation (${conversations.length} loaded)…`;
+    placeholder.textContent = skipped > 0 ? `Select a conversation (${conversations.length} new, ${skipped} skipped)…` : `Select a conversation (${conversations.length} loaded)…`;
     els.conversationSelect.appendChild(placeholder);
     for (const c of conversations) {
       const opt = document.createElement("option");
@@ -369,7 +454,10 @@ els.loadConversations.addEventListener("click", async () => {
     currentSessionIndex = null;
     els.downloadOne.disabled = true;
     els.preview.hidden = true;
-    els.convMeta.textContent = `${conversations.length} conversations loaded.`;
+    els.convMeta.textContent =
+      skipped > 0
+        ? `${conversations.length} new conversation(s) loaded (${skipped} skipped).`
+        : `${conversations.length} conversations loaded.`;
     showStatus("Conversations loaded.", false);
   } catch (e) {
     showStatus(e instanceof Error ? e.message : String(e), true);
@@ -413,8 +501,8 @@ els.fetchMessages.addEventListener("click", async () => {
     const payload = buildExportPayload({
       sessionIndex,
       email,
-      sessionIdShort: sessionIndex != null ? `session_${sessionIndex}` : null,
       assistantEmail: assistantEmailFromMessages(messages),
+      crispSessionId: sessionId,
       crispMessages: messages,
     });
     els.preview.textContent = JSON.stringify(payload, null, 2).slice(0, 12000);
@@ -439,8 +527,8 @@ els.downloadOne.addEventListener("click", () => {
   const payload = buildExportPayload({
     sessionIndex: currentSessionIndex,
     email,
-    sessionIdShort: currentSessionIndex != null ? `session_${currentSessionIndex}` : null,
     assistantEmail: currentMessages ? assistantEmailFromMessages(currentMessages) : "",
+    crispSessionId: currentSessionId,
     crispMessages: currentMessages,
   });
   const base = conv ? exportFileBase(conv, idx, total) : `${formatExportIndex(idx, total)}-export`;
@@ -477,8 +565,8 @@ els.bulkExport.addEventListener("click", async () => {
       const payload = buildExportPayload({
         sessionIndex,
         email,
-        sessionIdShort: `session_${sessionIndex}`,
         assistantEmail: assistantEmailFromMessages(messages),
+        crispSessionId: sid,
         crispMessages: messages,
       });
       const fileBase = exportFileBase(c, sessionIndex, total);
