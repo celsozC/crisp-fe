@@ -100,6 +100,41 @@ function exportFileBase(c, sessionIndex, total) {
   return idxStr ? `${idxStr}-${emailPart}` : emailPart;
 }
 
+function toISO(ms) {
+  const n = typeof ms === "number" ? ms : Number(ms);
+  if (!Number.isFinite(n)) return null;
+  return new Date(n).toISOString();
+}
+
+/**
+ * Reduce Crisp messages to the fields most useful for an AI agent.
+ * Removes duplicated ids (`session_id`, `website_id`) and bulky fields (`preview`, `mentions`, `read`, etc.).
+ */
+function cleanMessage(m, i) {
+  const content = m.content;
+  return {
+    message_index: i,
+    timestamp: typeof m.timestamp === "number" ? m.timestamp : null,
+    timestamp_iso: toISO(m.timestamp),
+    type: m.type ?? null,
+    from: m.from ?? null,
+    origin: m.origin ?? null,
+    content,
+    sender_nickname: m.user?.nickname ?? null,
+  };
+}
+
+function buildExportPayload({ sessionIndex, email, messages, messageCount, exportedAt }) {
+  return {
+    session_index: sessionIndex,
+    visitor_email: email || null,
+    website_id: websiteId,
+    exported_at: exportedAt,
+    message_count: messageCount ?? messages.length,
+    messages: messages.map((m, i) => cleanMessage(m, i)),
+  };
+}
+
 /**
  * Paginates 50 per page. Assigns 1-based session_index in reverse API order:
  * first conversation returned (newest / page 1) gets the highest number; the last gets 1.
@@ -273,8 +308,9 @@ els.fetchMessages.addEventListener("click", async () => {
       session_index: sessionIndex,
       visitor_email: email || null,
       website_id: websiteId,
+      exported_at: new Date().toISOString(),
       message_count: messages.length,
-      messages,
+      messages: messages.map((m, i) => cleanMessage(m, i)),
     };
     els.preview.textContent = JSON.stringify(previewObj, null, 2).slice(0, 12000);
     if (JSON.stringify(previewObj, null, 2).length > 12000) {
@@ -295,15 +331,14 @@ els.downloadOne.addEventListener("click", () => {
   const idx = currentSessionIndex ?? 0;
   const conv = conversations.find((c) => c.session_id === currentSessionId);
   const email = visitorEmail(conv ?? {});
-  const payload = {
-    session_index: currentSessionIndex,
-    visitor_email: email || null,
-    website_id: websiteId,
-    session_id: currentSessionId,
-    exported_at: new Date().toISOString(),
-    message_count: currentMessages.length,
+  const exportedAt = new Date().toISOString();
+  const payload = buildExportPayload({
+    sessionIndex: currentSessionIndex,
+    email,
     messages: currentMessages,
-  };
+    messageCount: currentMessages.length,
+    exportedAt,
+  });
   const base = conv ? exportFileBase(conv, idx, total) : `${formatExportIndex(idx, total)}-export`;
   const name = `crisp-messages-${base}.json`;
   downloadJson(name, payload);
@@ -325,6 +360,7 @@ els.bulkExport.addEventListener("click", async () => {
   try {
     els.bulkExport.disabled = true;
     const total = conversations.length;
+    const exportedAt = new Date().toISOString();
     for (let i = 0; i < total; i++) {
       const c = conversations[i];
       const sid = c.session_id;
@@ -335,15 +371,13 @@ els.bulkExport.addEventListener("click", async () => {
         `Fetching #${sessionIndex} (${i + 1} / ${total}) ${email || "(no email)"}…`
       );
       const messages = await fetchAllMessages(websiteId, sid);
-      const payload = {
-        session_index: sessionIndex,
-        visitor_email: email || null,
-        website_id: websiteId,
-        session_id: sid,
-        exported_at: new Date().toISOString(),
-        message_count: messages.length,
+      const payload = buildExportPayload({
+        sessionIndex,
+        email,
         messages,
-      };
+        messageCount: messages.length,
+        exportedAt,
+      });
       const fileBase = exportFileBase(c, sessionIndex, total);
       folder.file(`${fileBase}.json`, JSON.stringify(payload, null, 2));
       setProgress((i + 1) / total, `Done #${sessionIndex} (${i + 1} / ${total})`);
