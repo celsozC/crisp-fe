@@ -293,6 +293,21 @@ function buildExportPayload({
   };
 }
 
+function toMillis(v) {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string" && v.trim()) {
+    const n = Number(v);
+    if (Number.isFinite(n)) return n;
+    const t = Date.parse(v);
+    if (!Number.isNaN(t)) return t;
+  }
+  return 0;
+}
+
+function conversationCreatedAtMillis(c) {
+  return toMillis(c?.created_at) || toMillis(c?.updated_at) || 0;
+}
+
 /**
  * Paginates 50 per page. Assigns 1-based session_index in reverse API order:
  * first conversation returned (newest / page 1) gets the highest number; the last gets 1.
@@ -311,6 +326,14 @@ async function fetchAllConversations(wid) {
     if (chunk.length < PER_PAGE_CONV) break;
     page += 1;
   }
+
+  // Explicit sort by creation date (newest first), with deterministic tie-breaker.
+  raw.sort((a, b) => {
+    const d = conversationCreatedAtMillis(b) - conversationCreatedAtMillis(a);
+    if (d !== 0) return d;
+    return String(a?.session_id ?? "").localeCompare(String(b?.session_id ?? ""));
+  });
+
   const n = raw.length;
   return raw.map((c, i) => ({ ...c, session_index: n - i }));
 }
