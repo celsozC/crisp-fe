@@ -304,13 +304,16 @@ function toMillis(v) {
   return 0;
 }
 
+/** Sort key: prefer `updated_at`; use `created_at` only when `updated_at` is missing/invalid. */
 function conversationCreatedAtMillis(c) {
-  return toMillis(c?.created_at) || toMillis(c?.updated_at) || 0;
+  const updated = toMillis(c?.updated_at);
+  if (updated !== 0) return updated;
+  return toMillis(c?.created_at) || 0;
 }
 
 /**
- * Paginates 50 per page. Assigns 1-based session_index in reverse API order:
- * first conversation returned (newest / page 1) gets the highest number; the last gets 1.
+ * Paginates 50 per page, sorts by `updated_at` (else `created_at`), newest first.
+ * Assigns 1-based `session_index` in reverse of that order (newest gets highest index).
  * @returns {Promise<Array<Record<string, unknown> & { session_index: number }>>}
  */
 async function fetchAllConversations(wid) {
@@ -327,7 +330,7 @@ async function fetchAllConversations(wid) {
     page += 1;
   }
 
-  // Explicit sort by creation date (newest first), with deterministic tie-breaker.
+  // Sort by updated time (newest first), else created_at; tie-break by session_id.
   raw.sort((a, b) => {
     const d = conversationCreatedAtMillis(b) - conversationCreatedAtMillis(a);
     if (d !== 0) return d;
